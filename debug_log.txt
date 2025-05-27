@@ -1,0 +1,42 @@
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Form data received: Array
+(
+    [action] => create
+    [title] => test
+    [property_type] => Apartment
+    [price] => 121212
+    [size_sqft] => 1212121
+    [bedrooms] => 11
+    [bathrooms] => 11
+    [location] => 1111
+    [status] => Available
+    [description] => 
+)
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Properties fetched: 1
+Form data received: Array
+(
+    [action] => create
+    [title] => test
+    [property_type] => Apartment
+    [price] => 121212
+    [size_sqft] => 1212
+    [bedrooms] => 1
+    [bathrooms] => 2
+    [location] => 12121212
+    [status] => Available
+    [description] => 
+)
+Properties fetched: 2
+Properties fetched: 2
