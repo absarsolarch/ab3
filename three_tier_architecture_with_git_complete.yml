@@ -490,7 +490,7 @@ Resources:
       LaunchTemplateName: !Sub ${AWS::StackName}-WebServerLaunchTemplate
       VersionDescription: Initial version
       LaunchTemplateData:
-        ImageId: ami-028ab64837840c18f  # Amazon Linux 2 AMI (replace with the latest AMI ID)
+        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 AMI (replace with the latest AMI ID)
         InstanceType: !Ref WebServerInstanceType
         KeyName: !Ref KeyName
         SecurityGroupIds:
@@ -510,14 +510,14 @@ Resources:
             systemctl start httpd
             systemctl enable httpd
 
-            # Clone the repository directly to the document root
+            # Clone the repository
             cd /var/www/html
             git clone ${GitHubRepo} .
 
             # Get Redis endpoint from SSM Parameter Store
             REDIS_HOST=$(aws ssm get-parameter --name "/ab3/redis/endpoint" --query "Parameter.Value" --output text --region ${AWS::Region})
 
-            # Create frontend config file
+            # Create frontend config file for Redis and App Tier connection
             cat > /var/www/html/frontend_config.php << 'EOF'
             <?php
             // Configuration for three-tier architecture
@@ -532,7 +532,7 @@ Resources:
             ?>
             EOF
 
-            # Create frontend API client
+            # Create frontend API client to communicate with app tier
             cat > /var/www/html/frontend_api_client.php << 'EOF'
             <?php
             require_once "frontend_config.php";
@@ -571,7 +571,31 @@ Resources:
             ?>
             EOF
 
-            # Rename and modify frontend.php
+            # Create callback handler for app tier responses
+            cat > /var/www/html/frontend_callback.php << 'EOF'
+            <?php
+            session_start();
+            
+            // Process callback from app tier
+            if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+                $data = json_decode(file_get_contents('php://input'), true);
+                
+                if (isset($data['message'])) {
+                    $_SESSION['message'] = $data['message'];
+                }
+                
+                if (isset($data['error'])) {
+                    $_SESSION['error'] = $data['error'];
+                }
+            }
+            
+            // Redirect back to frontend
+            header('Location: frontend.php');
+            exit;
+            ?>
+            EOF
+
+            # Modify frontend.php to use app tier
             mv frontend.php frontend_original.php
             cat > /var/www/html/frontend.php << 'EOF'
             <?php
@@ -668,11 +692,6 @@ Resources:
                         <span class="navbar-brand mb-0 h1">
                             <i class="fas fa-building"></i> Anycompany Properties Sdn Bhd
                         </span>
-                        <div>
-                            <a href="frontend_view_db.php" class="btn btn-sm btn-outline-light">View DB</a>
-                            <a href="frontend_clear_db.php" class="btn btn-sm btn-outline-light">Clear DB</a>
-                            <a href="frontend_debug.php" class="btn btn-sm btn-outline-light">Debug</a>
-                        </div>
                     </div>
                 </nav>
 
@@ -839,39 +858,11 @@ Resources:
             </html>
             EOF
 
-            # Create callback handler
-            cat > /var/www/html/frontend_callback.php << 'EOF'
+            # Create index.php redirect
+            cat > /var/www/html/index.php << 'EOF'
             <?php
-            session_start();
-            
-            // Process callback from app tier
-            if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-                $data = json_decode(file_get_contents('php://input'), true);
-                
-                if (isset($data['message'])) {
-                    $_SESSION['message'] = $data['message'];
-                }
-                
-                if (isset($data['error'])) {
-                    $_SESSION['error'] = $data['error'];
-                }
-            }
-            
-            // Redirect back to frontend
-            header('Location: frontend.php');
+            header("Location: frontend.php");
             exit;
-            ?>
-            EOF
-
-            # Create debug page
-            cat > /var/www/html/frontend_debug.php << 'EOF'
-            <?php
-            require_once "frontend_config.php";
-            
-            // Display debug information
-            echo "<h1>Frontend Debug Information</h1>";
-            echo "<h2>PHP Info</h2>";
-            phpinfo();
             ?>
             EOF
 
@@ -897,7 +888,7 @@ Resources:
       LaunchTemplateName: !Sub ${AWS::StackName}-AppServerLaunchTemplate
       VersionDescription: Initial version
       LaunchTemplateData:
-        ImageId: ami-028ab64837840c18f  # Amazon Linux 2 AMI (replace with the latest AMI ID)
+        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 AMI (replace with the latest AMI ID)
         InstanceType: !Ref AppServerInstanceType
         KeyName: !Ref KeyName
         SecurityGroupIds:
@@ -911,19 +902,15 @@ Resources:
 
             # Install required packages
             yum update -y
-            yum install -y git httpd php php-pdo php-pgsql php-json php-redis
+            yum install -y git httpd php php-pdo php-pgsql php-json php-redis php-curl
 
             # Start and enable Apache
             systemctl start httpd
             systemctl enable httpd
 
-            # Clone the repository directly to the document root
+            # Clone the repository
             cd /var/www/html
             git clone ${GitHubRepo} .
-
-            # Set proper permissions
-            chown -R apache:apache /var/www/html
-            chmod -R 755 /var/www/html
 
             # Get configuration from SSM Parameter Store
             DB_HOST=$(aws ssm get-parameter --name "/ab3/db/host" --with-decryption --query "Parameter.Value" --output text --region ${AWS::Region})
@@ -967,89 +954,6 @@ Resources:
             ?>
             EOF
 
-            # Create Redis helper class
-            cat > /var/www/html/backend_redis_helper.php << 'EOF'
-            <?php
-            require_once "backend_config.php";
-
-            class RedisPropertyStore {
-                private $redis;
-                private $prefix = "property:";
-                
-                public function __construct() {
-                    global $redis_host, $redis_port;
-                    $this->redis = new Redis();
-                    $this->redis->connect($redis_host, $redis_port);
-                }
-                
-                public function getAllProperties() {
-                    $keys = $this->redis->keys($this->prefix . "*");
-                    $properties = [];
-                    
-                    foreach ($keys as $key) {
-                        $property = json_decode($this->redis->get($key), true);
-                        if ($property) {
-                            $properties[] = $property;
-                        }
-                    }
-                    
-                    // Sort by created_at desc
-                    usort($properties, function($a, $b) {
-                        return strtotime($b['created_at']) - strtotime($a['created_at']);
-                    });
-                    
-                    return $properties;
-                }
-                
-                public function getProperty($id) {
-                    $data = $this->redis->get($this->prefix . $id);
-                    return $data ? json_decode($data, true) : null;
-                }
-                
-                public function createProperty($data) {
-                    $id = $this->redis->incr("property_id_counter");
-                    $data['id'] = $id;
-                    $data['created_at'] = date("Y-m-d H:i:s");
-                    
-                    $this->redis->set($this->prefix . $id, json_encode($data));
-                    return $id;
-                }
-                
-                public function updateProperty($id, $data) {
-                    $property = $this->getProperty($id);
-                    if (!$property) {
-                        return false;
-                    }
-                    
-                    $property = array_merge($property, $data);
-                    $this->redis->set($this->prefix . $id, json_encode($property));
-                    return true;
-                }
-                
-                public function deleteProperty($id) {
-                    return $this->redis->del($this->prefix . $id);
-                }
-                
-                public function initTestData() {
-                    $keys = $this->redis->keys($this->prefix . "*");
-                    if (empty($keys)) {
-                        $this->createProperty([
-                            "title" => "Test Property 1",
-                            "property_type" => "Apartment",
-                            "price" => 450000,
-                            "size_sqft" => 1200,
-                            "bedrooms" => 3,
-                            "bathrooms" => 2,
-                            "location" => "Kuala Lumpur",
-                            "status" => "Available",
-                            "description" => "This is a test property for development purposes."
-                        ]);
-                    }
-                }
-            }
-            ?>
-            EOF
-
             # Create backend API file
             cat > /var/www/html/backend_api.php << 'EOF'
             <?php
@@ -1059,27 +963,48 @@ Resources:
             // Include required files
             require_once "backend_cors.php";
             require_once "backend_config.php";
-            require_once "backend_redis_helper.php";
 
             // Initialize variables
             $message = '';
             $error = '';
             $db_connected = false;
-            $redis_store = null;
+            $redis = null;
+            $redis_prefix = "property:";
 
             /**
              * Connect to the database
              * @return PDO|null Database connection or null on failure
              */
             function connectToDatabase() {
-                global $host, $dbname, $user, $password, $debug_mode, $redis_store;
+                global $host, $dbname, $user, $password, $debug_mode, $redis, $redis_host, $redis_port;
                 
                 try {
                     // For testing without a real database, use Redis
                     if ($host === "YOUR_RDS_ENDPOINT" || $host === "TEST_MODE") {
-                        // Initialize Redis store and test data
-                        $redis_store = new RedisPropertyStore();
-                        $redis_store->initTestData();
+                        // Initialize Redis
+                        $redis = new Redis();
+                        $redis->connect($redis_host, $redis_port);
+                        
+                        // Add test data if empty
+                        $keys = $redis->keys($redis_prefix . "*");
+                        if (empty($keys)) {
+                            $id = $redis->incr("property_id_counter");
+                            $property = [
+                                "id" => $id,
+                                "title" => "Test Property 1",
+                                "property_type" => "Apartment",
+                                "price" => 450000,
+                                "size_sqft" => 1200,
+                                "bedrooms" => 3,
+                                "bathrooms" => 2,
+                                "location" => "Kuala Lumpur",
+                                "status" => "Available",
+                                "description" => "This is a test property for development purposes.",
+                                "created_at" => date("Y-m-d H:i:s")
+                            ];
+                            $redis->set($redis_prefix . $id, json_encode($property));
+                        }
+                        
                         return true;
                     } else {
                         // Real PostgreSQL connection
@@ -1125,7 +1050,9 @@ Resources:
                             case 'create':
                                 if ($pdo === true) {
                                     // Using Redis
-                                    $redis_store->createProperty([
+                                    $id = $redis->incr("property_id_counter");
+                                    $property = [
+                                        'id' => $id,
                                         'title' => $_POST['title'],
                                         'property_type' => $_POST['property_type'],
                                         'price' => $_POST['price'],
@@ -1134,8 +1061,10 @@ Resources:
                                         'bathrooms' => $_POST['bathrooms'] ?? null,
                                         'location' => $_POST['location'],
                                         'status' => $_POST['status'],
-                                        'description' => $_POST['description'] ?? ''
-                                    ]);
+                                        'description' => $_POST['description'] ?? '',
+                                        'created_at' => date("Y-m-d H:i:s")
+                                    ];
+                                    $redis->set($redis_prefix . $id, json_encode($property));
                                 } else {
                                     // Using PostgreSQL
                                     $stmt = $pdo->prepare("INSERT INTO properties (title, property_type, price, size_sqft, bedrooms, bathrooms, location, status, description) 
@@ -1158,7 +1087,12 @@ Resources:
                             case 'update':
                                 if ($pdo === true) {
                                     // Using Redis
-                                    $redis_store->updateProperty($_POST['id'], ['status' => $_POST['status']]);
+                                    $data = $redis->get($redis_prefix . $_POST['id']);
+                                    if ($data) {
+                                        $property = json_decode($data, true);
+                                        $property['status'] = $_POST['status'];
+                                        $redis->set($redis_prefix . $_POST['id'], json_encode($property));
+                                    }
                                 } else {
                                     // Using PostgreSQL
                                     $stmt = $pdo->prepare("UPDATE properties SET status=? WHERE id=?");
@@ -1170,7 +1104,7 @@ Resources:
                             case 'delete':
                                 if ($pdo === true) {
                                     // Using Redis
-                                    $redis_store->deleteProperty($_POST['id']);
+                                    $redis->del($redis_prefix . $_POST['id']);
                                 } else {
                                     // Using PostgreSQL
                                     $stmt = $pdo->prepare("DELETE FROM properties WHERE id=?");
@@ -1234,7 +1168,17 @@ Resources:
                 try {
                     if ($pdo === true) {
                         // Using Redis
-                        $properties = $redis_store->getAllProperties();
+                        $keys = $redis->keys($redis_prefix . "*");
+                        foreach ($keys as $key) {
+                            $property = json_decode($redis->get($key), true);
+                            if ($property) {
+                                $properties[] = $property;
+                            }
+                        }
+                        // Sort by created_at desc
+                        usort($properties, function($a, $b) {
+                            return strtotime($b['created_at']) - strtotime($a['created_at']);
+                        });
                     } else {
                         // Using PostgreSQL
                         $stmt = $pdo->query("SELECT * FROM properties ORDER BY created_at DESC");
@@ -1280,7 +1224,8 @@ Resources:
                                 if (isset($_GET['id'])) {
                                     if ($pdo === true) {
                                         // Using Redis
-                                        $property = $redis_store->getProperty($_GET['id']);
+                                        $data = $redis->get($redis_prefix . $_GET['id']);
+                                        $property = $data ? json_decode($data, true) : null;
                                         echo json_encode($property ?: ['error' => 'Property not found']);
                                     } else {
                                         // Using PostgreSQL
@@ -1293,6 +1238,21 @@ Resources:
                                     echo json_encode(['error' => 'Property ID required']);
                                 }
                                 break;
+                            case 'clear':
+                                if ($pdo === true) {
+                                    // Using Redis
+                                    $keys = $redis->keys($redis_prefix . "*");
+                                    if (!empty($keys)) {
+                                        $redis->del($keys);
+                                    }
+                                    $redis->set("property_id_counter", 0);
+                                    echo json_encode(['status' => 'success', 'message' => 'Database cleared']);
+                                } else {
+                                    // Using PostgreSQL
+                                    $pdo->exec("TRUNCATE TABLE properties RESTART IDENTITY");
+                                    echo json_encode(['status' => 'success', 'message' => 'Database cleared']);
+                                }
+                                break;
                             default:
                                 echo json_encode(['error' => 'Unknown API endpoint']);
                         }
@@ -1302,6 +1262,14 @@ Resources:
                     exit;
                 }
             }
+            ?>
+            EOF
+
+            # Create index.php redirect
+            cat > /var/www/html/index.php << 'EOF'
+            <?php
+            header("Location: backend_api.php?test=1");
+            exit;
             ?>
             EOF
 
@@ -1334,7 +1302,7 @@ Resources:
       DBInstanceClass: !Ref DBInstanceType
       DBName: !Ref DBName
       Engine: postgres
-      EngineVersion: 17.2
+      EngineVersion: 13.7
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Ref DBPassword
       DBSubnetGroupName: !Ref DBSubnetGroup

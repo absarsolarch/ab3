@@ -95,11 +95,6 @@ Parameters:
     Description: Name of an existing EC2 KeyPair to enable SSH access
     Type: AWS::EC2::KeyPair::KeyName
 
-  GitHubRepo:
-    Description: GitHub repository URL
-    Type: String
-    Default: https://github.com/absarsolarch/ab3.git
-
 Resources:
   # VPC and Network Resources
   VPC:
@@ -504,15 +499,14 @@ Resources:
 
             # Install required packages
             yum update -y
-            yum install -y git httpd php php-pdo php-json php-curl php-redis
+            yum install -y httpd php php-pdo php-json php-curl php-redis
 
             # Start and enable Apache
             systemctl start httpd
             systemctl enable httpd
 
-            # Clone the repository directly to the document root
-            cd /var/www/html
-            git clone ${GitHubRepo} .
+            # Create document root directory
+            mkdir -p /var/www/html
 
             # Get Redis endpoint from SSM Parameter Store
             REDIS_HOST=$(aws ssm get-parameter --name "/ab3/redis/endpoint" --query "Parameter.Value" --output text --region ${AWS::Region})
@@ -571,8 +565,7 @@ Resources:
             ?>
             EOF
 
-            # Rename and modify frontend.php
-            mv frontend.php frontend_original.php
+            # Create frontend.php
             cat > /var/www/html/frontend.php << 'EOF'
             <?php
             // Start session for message passing between pages
@@ -875,6 +868,72 @@ Resources:
             ?>
             EOF
 
+            # Create view DB page
+            cat > /var/www/html/frontend_view_db.php << 'EOF'
+            <?php
+            require_once "frontend_config.php";
+            require_once "frontend_api_client.php";
+            
+            $properties = getProperties();
+            
+            echo "<h1>Database Contents</h1>";
+            echo "<h2>Properties</h2>";
+            
+            if (empty($properties)) {
+                echo "<p>No properties found in the database.</p>";
+            } else {
+                echo "<table border='1' cellpadding='5'>";
+                echo "<tr><th>ID</th><th>Title</th><th>Type</th><th>Price</th><th>Size</th><th>Bedrooms</th><th>Bathrooms</th><th>Location</th><th>Status</th><th>Created</th></tr>";
+                
+                foreach ($properties as $property) {
+                    echo "<tr>";
+                    echo "<td>" . htmlspecialchars($property['id']) . "</td>";
+                    echo "<td>" . htmlspecialchars($property['title']) . "</td>";
+                    echo "<td>" . htmlspecialchars($property['property_type']) . "</td>";
+                    echo "<td>" . formatPrice($property['price']) . "</td>";
+                    echo "<td>" . htmlspecialchars($property['size_sqft']) . " sq ft</td>";
+                    echo "<td>" . htmlspecialchars($property['bedrooms'] ?? 'N/A') . "</td>";
+                    echo "<td>" . htmlspecialchars($property['bathrooms'] ?? 'N/A') . "</td>";
+                    echo "<td>" . htmlspecialchars($property['location']) . "</td>";
+                    echo "<td>" . htmlspecialchars($property['status']) . "</td>";
+                    echo "<td>" . htmlspecialchars($property['created_at']) . "</td>";
+                    echo "</tr>";
+                }
+                
+                echo "</table>";
+            }
+            
+            echo "<p><a href='frontend.php'>Back to Property Management</a></p>";
+            ?>
+            EOF
+
+            # Create clear DB page
+            cat > /var/www/html/frontend_clear_db.php << 'EOF'
+            <?php
+            require_once "frontend_config.php";
+            
+            // Send clear request to app tier
+            $ch = curl_init($app_tier_endpoint . "/backend_api.php?api=clear");
+            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+            $response = curl_exec($ch);
+            curl_close($ch);
+            
+            // Set message and redirect
+            session_start();
+            $_SESSION['message'] = "Database cleared successfully.";
+            header("Location: frontend.php");
+            exit;
+            ?>
+            EOF
+
+            # Create index.php redirect
+            cat > /var/www/html/index.php << 'EOF'
+            <?php
+            header("Location: frontend.php");
+            exit;
+            ?>
+            EOF
+
             # Set proper permissions
             chown -R apache:apache /var/www/html
             chmod -R 755 /var/www/html
@@ -911,19 +970,14 @@ Resources:
 
             # Install required packages
             yum update -y
-            yum install -y git httpd php php-pdo php-pgsql php-json php-redis
+            yum install -y httpd php php-pdo php-pgsql php-json php-redis
 
             # Start and enable Apache
             systemctl start httpd
             systemctl enable httpd
 
-            # Clone the repository directly to the document root
-            cd /var/www/html
-            git clone ${GitHubRepo} .
-
-            # Set proper permissions
-            chown -R apache:apache /var/www/html
-            chmod -R 755 /var/www/html
+            # Create document root directory
+            mkdir -p /var/www/html
 
             # Get configuration from SSM Parameter Store
             DB_HOST=$(aws ssm get-parameter --name "/ab3/db/host" --with-decryption --query "Parameter.Value" --output text --region ${AWS::Region})
@@ -1028,6 +1082,15 @@ Resources:
                 
                 public function deleteProperty($id) {
                     return $this->redis->del($this->prefix . $id);
+                }
+                
+                public function clearAll() {
+                    $keys = $this->redis->keys($this->prefix . "*");
+                    if (!empty($keys)) {
+                        $this->redis->del($keys);
+                    }
+                    $this->redis->set("property_id_counter", 0);
+                    return true;
                 }
                 
                 public function initTestData() {
@@ -1293,6 +1356,18 @@ Resources:
                                     echo json_encode(['error' => 'Property ID required']);
                                 }
                                 break;
+                            case 'clear':
+                                if ($pdo === true) {
+                                    // Using Redis
+                                    $redis_store->clearAll();
+                                    $redis_store->initTestData();
+                                    echo json_encode(['status' => 'success', 'message' => 'Database cleared']);
+                                } else {
+                                    // Using PostgreSQL
+                                    $pdo->exec("TRUNCATE TABLE properties RESTART IDENTITY");
+                                    echo json_encode(['status' => 'success', 'message' => 'Database cleared']);
+                                }
+                                break;
                             default:
                                 echo json_encode(['error' => 'Unknown API endpoint']);
                         }
@@ -1302,6 +1377,14 @@ Resources:
                     exit;
                 }
             }
+            ?>
+            EOF
+
+            # Create index.php redirect
+            cat > /var/www/html/index.php << 'EOF'
+            <?php
+            header("Location: backend_api.php?test=1");
+            exit;
             ?>
             EOF
 
