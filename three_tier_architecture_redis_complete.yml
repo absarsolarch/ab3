@@ -1,0 +1,1503 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Three-tier web application architecture with web, app, and database servers using Redis for session management'
+
+Parameters:
+  VpcCIDR:
+    Description: CIDR block for the VPC
+    Type: String
+    Default: 10.0.0.0/16
+
+  PublicSubnet1CIDR:
+    Description: CIDR block for the public subnet in AZ 1
+    Type: String
+    Default: 10.0.1.0/24
+
+  PublicSubnet2CIDR:
+    Description: CIDR block for the public subnet in AZ 2
+    Type: String
+    Default: 10.0.2.0/24
+
+  PrivateSubnet1CIDR:
+    Description: CIDR block for the private subnet in AZ 1
+    Type: String
+    Default: 10.0.3.0/24
+
+  PrivateSubnet2CIDR:
+    Description: CIDR block for the private subnet in AZ 2
+    Type: String
+    Default: 10.0.4.0/24
+
+  DBSubnet1CIDR:
+    Description: CIDR block for the database subnet in AZ 1
+    Type: String
+    Default: 10.0.5.0/24
+
+  DBSubnet2CIDR:
+    Description: CIDR block for the database subnet in AZ 2
+    Type: String
+    Default: 10.0.6.0/24
+
+  WebServerInstanceType:
+    Description: EC2 instance type for the web servers
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t3.micro
+      - t3.small
+
+  AppServerInstanceType:
+    Description: EC2 instance type for the application servers
+    Type: String
+    Default: t3.micro
+    AllowedValues:
+      - t2.micro
+      - t2.small
+      - t3.micro
+      - t3.small
+
+  DBInstanceType:
+    Description: RDS instance type for the database
+    Type: String
+    Default: db.t3.micro
+    AllowedValues:
+      - db.t3.micro
+      - db.t3.small
+      - db.t3.medium
+
+  RedisInstanceType:
+    Description: ElastiCache Redis instance type
+    Type: String
+    Default: cache.t3.micro
+    AllowedValues:
+      - cache.t2.micro
+      - cache.t3.micro
+      - cache.t3.small
+
+  DBName:
+    Description: Name of the database
+    Type: String
+    Default: myappdb
+
+  DBUsername:
+    Description: Username for the database
+    Type: String
+    Default: app_user
+
+  DBPassword:
+    Description: Password for the database
+    Type: String
+    NoEcho: true
+    MinLength: 8
+
+  KeyName:
+    Description: Name of an existing EC2 KeyPair to enable SSH access
+    Type: AWS::EC2::KeyPair::KeyName
+
+  GitHubRepo:
+    Description: GitHub repository URL
+    Type: String
+    Default: https://github.com/absarsolarch/ab3.git
+
+Resources:
+  # VPC and Network Resources
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-VPC
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-IGW
+
+  InternetGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      InternetGatewayId: !Ref InternetGateway
+      VpcId: !Ref VPC
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet1CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PublicSubnet2CIDR
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicSubnet2
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref PrivateSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateSubnet2
+
+  DBSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: !Ref DBSubnet1CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DBSubnet1
+
+  DBSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: !Ref DBSubnet2CIDR
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DBSubnet2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PublicRouteTable
+
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  NatGateway1EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway2EIP:
+    Type: AWS::EC2::EIP
+    DependsOn: InternetGatewayAttachment
+    Properties:
+      Domain: vpc
+
+  NatGateway1:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway1EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  NatGateway2:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGateway2EIP.AllocationId
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable1:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable1
+
+  DefaultPrivateRoute1:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway1
+
+  PrivateSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable1
+      SubnetId: !Ref PrivateSubnet1
+
+  PrivateRouteTable2:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-PrivateRouteTable2
+
+  DefaultPrivateRoute2:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway2
+
+  PrivateSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable2
+      SubnetId: !Ref PrivateSubnet2
+
+  DBRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DBRouteTable
+
+  DBSubnet1RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DBRouteTable
+      SubnetId: !Ref DBSubnet1
+
+  DBSubnet2RouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref DBRouteTable
+      SubnetId: !Ref DBSubnet2
+
+  # Security Groups
+  WebServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for web servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-WebServerSG
+
+  AppServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for application servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-AppServerSG
+
+  DBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for database servers
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 5432
+          ToPort: 5432
+          SourceSecurityGroupId: !Ref AppServerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-DBSG
+
+  # Redis Security Group
+  RedisSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Redis ElastiCache
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref AppServerSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 6379
+          ToPort: 6379
+          SourceSecurityGroupId: !Ref WebServerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-RedisSG
+
+  # SSM Parameters for Database Configuration
+  DBHostParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ab3/db/host
+      Type: String
+      Value: !GetAtt DBInstance.Endpoint.Address
+      Description: Database host endpoint
+
+  DBNameParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ab3/db/name
+      Type: String
+      Value: !Ref DBName
+      Description: Database name
+
+  DBUserParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ab3/db/user
+      Type: String
+      Value: !Ref DBUsername
+      Description: Database username
+
+  DBPasswordParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ab3/db/password
+      Type: String
+      Value: !Ref DBPassword
+      Description: Database password
+      Tier: Standard
+
+  # Redis Parameter
+  RedisEndpointParameter:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /ab3/redis/endpoint
+      Type: String
+      Value: !GetAtt RedisCluster.RedisEndpoint.Address
+      Description: Redis endpoint
+
+  # IAM Role for EC2 instances to access SSM parameters
+  EC2Role:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess
+      Policies:
+        - PolicyName: SSMParameterAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ssm:GetParameter
+                  - ssm:GetParameters
+                Resource: !Sub arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/ab3/*
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2Role
+
+  # Redis ElastiCache
+  RedisSubnetGroup:
+    Type: AWS::ElastiCache::SubnetGroup
+    Properties:
+      Description: Subnet group for Redis ElastiCache
+      SubnetIds:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+
+  RedisCluster:
+    Type: AWS::ElastiCache::CacheCluster
+    Properties:
+      CacheNodeType: !Ref RedisInstanceType
+      Engine: redis
+      NumCacheNodes: 1
+      CacheSubnetGroupName: !Ref RedisSubnetGroup
+      VpcSecurityGroupIds:
+        - !Ref RedisSecurityGroup
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Redis
+
+  # Launch Templates
+  WebServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-WebServerLaunchTemplate
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 AMI (replace with the latest AMI ID)
+        InstanceType: !Ref WebServerInstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref WebServerSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # Web Server User Data Script
+
+            # Install required packages
+            yum update -y
+            yum install -y git httpd php php-pdo php-json php-curl php-redis
+
+            # Start and enable Apache
+            systemctl start httpd
+            systemctl enable httpd
+
+            # Clone the repository directly to the document root
+            cd /var/www/html
+            git clone ${GitHubRepo} .
+
+            # Get Redis endpoint from SSM Parameter Store
+            REDIS_HOST=$(aws ssm get-parameter --name "/ab3/redis/endpoint" --query "Parameter.Value" --output text --region ${AWS::Region})
+
+            # Create frontend config file
+            cat > /var/www/html/frontend_config.php << 'EOF'
+            <?php
+            // Configuration for three-tier architecture
+            $app_tier_endpoint = "http://${AppServerLoadBalancer.DNSName}";
+            $redis_host = "$REDIS_HOST";
+            $redis_port = 6379;
+            $debug_mode = true;
+
+            // Initialize Redis for session management
+            ini_set('session.save_handler', 'redis');
+            ini_set('session.save_path', "tcp://$redis_host:$redis_port");
+            ?>
+            EOF
+
+            # Create frontend API client
+            cat > /var/www/html/frontend_api_client.php << 'EOF'
+            <?php
+            require_once "frontend_config.php";
+
+            // Function to get properties from app tier
+            function getProperties() {
+                global $app_tier_endpoint;
+                $properties = [];
+                
+                try {
+                    $ch = curl_init();
+                    curl_setopt($ch, CURLOPT_URL, $app_tier_endpoint . "/backend_api.php?api=properties");
+                    curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+                    curl_setopt($ch, CURLOPT_TIMEOUT, 10);
+                    $response = curl_exec($ch);
+                    $http_code = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+                    curl_close($ch);
+                    
+                    if ($http_code == 200 && $response) {
+                        $properties = json_decode($response, true);
+                        if (!is_array($properties)) {
+                            $properties = [];
+                        }
+                    }
+                } catch (Exception $e) {
+                    error_log("Error fetching properties: " . $e->getMessage());
+                }
+                
+                return $properties;
+            }
+
+            // Function to format price in MYR
+            function formatPrice($price) {
+                return 'RM ' . number_format($price, 2);
+            }
+            ?>
+            EOF
+
+            # Rename and modify frontend.php
+            mv frontend.php frontend_original.php
+            cat > /var/www/html/frontend.php << 'EOF'
+            <?php
+            // Start session for message passing between pages
+            session_start();
+
+            // Include frontend components
+            require_once "frontend_config.php";
+            require_once "frontend_api_client.php";
+
+            // Initialize variables
+            $message = '';
+            $error = '';
+            $properties = getProperties();
+            $db_connected = !empty($properties);
+
+            // Check for session messages
+            if (isset($_SESSION['message'])) {
+                $message = $_SESSION['message'];
+                unset($_SESSION['message']);
+            }
+
+            if (isset($_SESSION['error'])) {
+                $error = $_SESSION['error'];
+                unset($_SESSION['error']);
+            }
+            ?>
+            <!DOCTYPE html>
+            <html lang="en">
+            <head>
+                <meta charset="UTF-8">
+                <meta name="viewport" content="width=device-width, initial-scale=1.0">
+                <title>Anycompany Properties Sdn Bhd - Property Management</title>
+                <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
+                <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+                <style>
+                    :root {
+                        --primary-color: #2c3e50;
+                        --secondary-color: #e74c3c;
+                    }
+                    .navbar {
+                        background-color: var(--primary-color) !important;
+                    }
+                    .btn-primary {
+                        background-color: var(--secondary-color);
+                        border-color: var(--secondary-color);
+                    }
+                    .btn-primary:hover {
+                        background-color: #c0392b;
+                        border-color: #c0392b;
+                    }
+                    .card {
+                        margin-bottom: 20px;
+                        box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+                    }
+                    .property-card {
+                        height: 100%;
+                    }
+                    .status-badge {
+                        position: absolute;
+                        top: 10px;
+                        right: 10px;
+                        padding: 5px 10px;
+                        border-radius: 3px;
+                    }
+                    .price-tag {
+                        font-size: 1.5em;
+                        color: var(--secondary-color);
+                        font-weight: bold;
+                    }
+                    .property-features {
+                        margin: 10px 0;
+                    }
+                    .feature-icon {
+                        margin-right: 15px;
+                        color: var(--primary-color);
+                    }
+                    .system-status {
+                        font-size: 0.8em;
+                        margin-bottom: 20px;
+                    }
+                    .debug-info {
+                        font-size: 0.8em;
+                        background-color: #f8f9fa;
+                        padding: 10px;
+                        border-radius: 5px;
+                        margin-top: 20px;
+                    }
+                </style>
+            </head>
+            <body>
+                <nav class="navbar navbar-dark mb-4">
+                    <div class="container">
+                        <span class="navbar-brand mb-0 h1">
+                            <i class="fas fa-building"></i> Anycompany Properties Sdn Bhd
+                        </span>
+                        <div>
+                            <a href="frontend_view_db.php" class="btn btn-sm btn-outline-light">View DB</a>
+                            <a href="frontend_clear_db.php" class="btn btn-sm btn-outline-light">Clear DB</a>
+                            <a href="frontend_debug.php" class="btn btn-sm btn-outline-light">Debug</a>
+                        </div>
+                    </div>
+                </nav>
+
+                <div class="container">
+                    <?php if (isset($message) && $message): ?>
+                        <div class="alert alert-success"><?php echo htmlspecialchars($message); ?></div>
+                    <?php endif; ?>
+                    
+                    <?php if (isset($error) && $error): ?>
+                        <div class="alert alert-danger"><?php echo htmlspecialchars($error); ?></div>
+                    <?php endif; ?>
+                    
+                    <?php if (!$db_connected): ?>
+                        <div class="alert alert-warning">
+                            <strong>Note:</strong> Unable to connect to the application tier or database. 
+                            Please check your configuration.
+                        </div>
+                    <?php endif; ?>
+
+                    <div class="row">
+                        <div class="col-md-4">
+                            <div class="card">
+                                <div class="card-header bg-primary text-white">
+                                    <i class="fas fa-plus"></i> Add New Property
+                                </div>
+                                <div class="card-body">
+                                    <form method="POST" action="<?php echo $app_tier_endpoint; ?>/backend_api.php">
+                                        <input type="hidden" name="action" value="create">
+                                        <input type="hidden" name="callback_url" value="<?php echo $_SERVER['HTTP_HOST']; ?>/frontend_callback.php">
+                                        <div class="mb-3">
+                                            <label class="form-label">Property Title</label>
+                                            <input type="text" name="title" class="form-control" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Property Type</label>
+                                            <select name="property_type" class="form-control" required>
+                                                <option value="Apartment">Apartment</option>
+                                                <option value="House">House</option>
+                                                <option value="Land">Land</option>
+                                                <option value="Commercial">Commercial</option>
+                                            </select>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Price (MYR)</label>
+                                            <input type="number" name="price" class="form-control" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Size (sq ft)</label>
+                                            <input type="number" name="size_sqft" class="form-control" required>
+                                        </div>
+                                        <div class="row mb-3">
+                                            <div class="col">
+                                                <label class="form-label">Bedrooms</label>
+                                                <input type="number" name="bedrooms" class="form-control">
+                                            </div>
+                                            <div class="col">
+                                                <label class="form-label">Bathrooms</label>
+                                                <input type="number" name="bathrooms" class="form-control">
+                                            </div>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Location</label>
+                                            <input type="text" name="location" class="form-control" required>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Status</label>
+                                            <select name="status" class="form-control" required>
+                                                <option value="Available">Available</option>
+                                                <option value="Under Contract">Under Contract</option>
+                                                <option value="Sold">Sold</option>
+                                            </select>
+                                        </div>
+                                        <div class="mb-3">
+                                            <label class="form-label">Description</label>
+                                            <textarea name="description" class="form-control" rows="3"></textarea>
+                                        </div>
+                                        <button type="submit" class="btn btn-primary">Add Property</button>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="col-md-8">
+                            <h2 class="mb-4">Property Listings</h2>
+                            <?php if (empty($properties)): ?>
+                                <div class="alert alert-info">No properties found. Add your first property using the form.</div>
+                            <?php else: ?>
+                                <div class="row">
+                                    <?php foreach ($properties as $property): ?>
+                                        <div class="col-md-6 mb-4">
+                                            <div class="card property-card">
+                                                <div class="card-body">
+                                                    <span class="status-badge bg-<?php 
+                                                        echo $property['status'] == 'Available' ? 'success' : 
+                                                            ($property['status'] == 'Under Contract' ? 'warning' : 'danger'); 
+                                                    ?>">
+                                                        <?php echo htmlspecialchars($property['status']); ?>
+                                                    </span>
+                                                    <h5 class="card-title"><?php echo htmlspecialchars($property['title']); ?></h5>
+                                                    <div class="price-tag"><?php echo formatPrice($property['price']); ?></div>
+                                                    <div class="property-features">
+                                                        <span class="feature-icon">
+                                                            <i class="fas fa-ruler-combined"></i> <?php echo htmlspecialchars($property['size_sqft']); ?> sq ft
+                                                        </span>
+                                                        <span class="feature-icon">
+                                                            <i class="fas fa-bed"></i> <?php echo htmlspecialchars($property['bedrooms'] ?? 'N/A'); ?>
+                                                        </span>
+                                                        <span class="feature-icon">
+                                                            <i class="fas fa-bath"></i> <?php echo htmlspecialchars($property['bathrooms'] ?? 'N/A'); ?>
+                                                        </span>
+                                                    </div>
+                                                    <p><i class="fas fa-map-marker-alt"></i> <?php echo htmlspecialchars($property['location']); ?></p>
+                                                    <p class="card-text"><?php echo htmlspecialchars($property['description'] ?? ''); ?></p>
+                                                    
+                                                    <div class="d-flex justify-content-between mt-3">
+                                                        <form method="POST" action="<?php echo $app_tier_endpoint; ?>/backend_api.php" class="me-2">
+                                                            <input type="hidden" name="action" value="update">
+                                                            <input type="hidden" name="id" value="<?php echo $property['id']; ?>">
+                                                            <input type="hidden" name="callback_url" value="<?php echo $_SERVER['HTTP_HOST']; ?>/frontend_callback.php">
+                                                            <select name="status" class="form-select form-select-sm" onchange="this.form.submit()">
+                                                                <option value="Available" <?php echo $property['status'] == 'Available' ? 'selected' : ''; ?>>Available</option>
+                                                                <option value="Under Contract" <?php echo $property['status'] == 'Under Contract' ? 'selected' : ''; ?>>Under Contract</option>
+                                                                <option value="Sold" <?php echo $property['status'] == 'Sold' ? 'selected' : ''; ?>>Sold</option>
+                                                            </select>
+                                                        </form>
+                                                        <form method="POST" action="<?php echo $app_tier_endpoint; ?>/backend_api.php" style="display: inline;">
+                                                            <input type="hidden" name="action" value="delete">
+                                                            <input type="hidden" name="id" value="<?php echo $property['id']; ?>">
+                                                            <input type="hidden" name="callback_url" value="<?php echo $_SERVER['HTTP_HOST']; ?>/frontend_callback.php">
+                                                            <button type="submit" class="btn btn-danger btn-sm" onclick="return confirm('Are you sure you want to delete this property?')">
+                                                                <i class="fas fa-trash"></i> Delete
+                                                            </button>
+                                                        </form>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            <?php endif; ?>
+                        </div>
+                    </div>
+                    
+                    <footer class="mt-5 pt-3 border-top text-muted">
+                        <div class="system-status">
+                            <p>System Status: <?php echo $db_connected ? 'Connected to application tier' : 'Unable to connect to application tier'; ?></p>
+                        </div>
+                        
+                        <?php if ($debug_mode): ?>
+                        <div class="debug-info">
+                            <h5>Debug Information</h5>
+                            <p>PHP Version: <?php echo phpversion(); ?></p>
+                            <p>Session ID: <?php echo session_id(); ?></p>
+                            <p>Properties Count: <?php echo count($properties); ?></p>
+                            <p>App Tier Endpoint: <?php echo $app_tier_endpoint; ?></p>
+                            <p>Redis Host: <?php echo $redis_host; ?></p>
+                        </div>
+                        <?php endif; ?>
+                    </footer>
+                </div>
+
+                <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/js/bootstrap.bundle.min.js"></script>
+            </body>
+            </html>
+            EOF
+
+            # Create callback handler
+            cat > /var/www/html/frontend_callback.php << 'EOF'
+            <?php
+            session_start();
+            
+            // Process callback from app tier
+            if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+                $data = json_decode(file_get_contents('php://input'), true);
+                
+                if (isset($data['message'])) {
+                    $_SESSION['message'] = $data['message'];
+                }
+                
+                if (isset($data['error'])) {
+                    $_SESSION['error'] = $data['error'];
+                }
+            }
+            
+            // Redirect back to frontend
+            header('Location: frontend.php');
+            exit;
+            ?>
+            EOF
+
+            # Create debug page
+            cat > /var/www/html/frontend_debug.php << 'EOF'
+            <?php
+            require_once "frontend_config.php";
+            
+            // Display debug information
+            echo "<h1>Frontend Debug Information</h1>";
+            echo "<h2>PHP Info</h2>";
+            phpinfo();
+            ?>
+            EOF
+
+            # Set proper permissions
+            chown -R apache:apache /var/www/html
+            chmod -R 755 /var/www/html
+
+            # Configure Apache to allow .htaccess files
+            sed -i '/<Directory "\/var\/www\/html">/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/httpd/conf/httpd.conf
+
+            # Restart Apache to apply changes
+            systemctl restart httpd
+
+            # Create a health check file
+            echo "OK" > /var/www/html/health.html
+
+            # Log completion
+            echo "Web server setup completed" > /var/log/user-data-success.log
+
+  AppServerLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-AppServerLaunchTemplate
+      VersionDescription: Initial version
+      LaunchTemplateData:
+        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 AMI (replace with the latest AMI ID)
+        InstanceType: !Ref AppServerInstanceType
+        KeyName: !Ref KeyName
+        SecurityGroupIds:
+          - !Ref AppServerSecurityGroup
+        IamInstanceProfile:
+          Name: !Ref EC2InstanceProfile
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            # App Server User Data Script
+
+            # Install required packages
+            yum update -y
+            yum install -y git httpd php php-pdo php-pgsql php-json php-redis
+
+            # Start and enable Apache
+            systemctl start httpd
+            systemctl enable httpd
+
+            # Clone the repository directly to the document root
+            cd /var/www/html
+            git clone ${GitHubRepo} .
+
+            # Set proper permissions
+            chown -R apache:apache /var/www/html
+            chmod -R 755 /var/www/html
+
+            # Get configuration from SSM Parameter Store
+            DB_HOST=$(aws ssm get-parameter --name "/ab3/db/host" --with-decryption --query "Parameter.Value" --output text --region ${AWS::Region})
+            DB_NAME=$(aws ssm get-parameter --name "/ab3/db/name" --with-decryption --query "Parameter.Value" --output text --region ${AWS::Region})
+            DB_USER=$(aws ssm get-parameter --name "/ab3/db/user" --with-decryption --query "Parameter.Value" --output text --region ${AWS::Region})
+            DB_PASSWORD=$(aws ssm get-parameter --name "/ab3/db/password" --with-decryption --query "Parameter.Value" --output text --region ${AWS::Region})
+            REDIS_HOST=$(aws ssm get-parameter --name "/ab3/redis/endpoint" --query "Parameter.Value" --output text --region ${AWS::Region})
+
+            # Create backend config file
+            cat > /var/www/html/backend_config.php << 'EOF'
+            <?php
+            // Database connection parameters
+            $host = "$DB_HOST";
+            $dbname = "$DB_NAME";
+            $user = "$DB_USER";
+            $password = "$DB_PASSWORD";
+            $redis_host = "$REDIS_HOST";
+            $redis_port = 6379;
+
+            // Debug mode - set to true to see detailed errors
+            $debug_mode = true;
+
+            // Use Redis for session management
+            ini_set('session.save_handler', 'redis');
+            ini_set('session.save_path', "tcp://$redis_host:$redis_port");
+            ?>
+            EOF
+
+            # Create CORS headers file
+            cat > /var/www/html/backend_cors.php << 'EOF'
+            <?php
+            // Add CORS headers to allow cross-origin requests
+            header("Access-Control-Allow-Origin: *");
+            header("Access-Control-Allow-Methods: POST, GET, OPTIONS");
+            header("Access-Control-Allow-Headers: Content-Type");
+
+            // Handle preflight requests
+            if ($_SERVER["REQUEST_METHOD"] == "OPTIONS") {
+                exit(0);
+            }
+            ?>
+            EOF
+
+            # Create Redis helper class
+            cat > /var/www/html/backend_redis_helper.php << 'EOF'
+            <?php
+            require_once "backend_config.php";
+
+            class RedisPropertyStore {
+                private $redis;
+                private $prefix = "property:";
+                
+                public function __construct() {
+                    global $redis_host, $redis_port;
+                    $this->redis = new Redis();
+                    $this->redis->connect($redis_host, $redis_port);
+                }
+                
+                public function getAllProperties() {
+                    $keys = $this->redis->keys($this->prefix . "*");
+                    $properties = [];
+                    
+                    foreach ($keys as $key) {
+                        $property = json_decode($this->redis->get($key), true);
+                        if ($property) {
+                            $properties[] = $property;
+                        }
+                    }
+                    
+                    // Sort by created_at desc
+                    usort($properties, function($a, $b) {
+                        return strtotime($b['created_at']) - strtotime($a['created_at']);
+                    });
+                    
+                    return $properties;
+                }
+                
+                public function getProperty($id) {
+                    $data = $this->redis->get($this->prefix . $id);
+                    return $data ? json_decode($data, true) : null;
+                }
+                
+                public function createProperty($data) {
+                    $id = $this->redis->incr("property_id_counter");
+                    $data['id'] = $id;
+                    $data['created_at'] = date("Y-m-d H:i:s");
+                    
+                    $this->redis->set($this->prefix . $id, json_encode($data));
+                    return $id;
+                }
+                
+                public function updateProperty($id, $data) {
+                    $property = $this->getProperty($id);
+                    if (!$property) {
+                        return false;
+                    }
+                    
+                    $property = array_merge($property, $data);
+                    $this->redis->set($this->prefix . $id, json_encode($property));
+                    return true;
+                }
+                
+                public function deleteProperty($id) {
+                    return $this->redis->del($this->prefix . $id);
+                }
+                
+                public function initTestData() {
+                    $keys = $this->redis->keys($this->prefix . "*");
+                    if (empty($keys)) {
+                        $this->createProperty([
+                            "title" => "Test Property 1",
+                            "property_type" => "Apartment",
+                            "price" => 450000,
+                            "size_sqft" => 1200,
+                            "bedrooms" => 3,
+                            "bathrooms" => 2,
+                            "location" => "Kuala Lumpur",
+                            "status" => "Available",
+                            "description" => "This is a test property for development purposes."
+                        ]);
+                    }
+                }
+            }
+            ?>
+            EOF
+
+            # Create backend API file
+            cat > /var/www/html/backend_api.php << 'EOF'
+            <?php
+            // Start session for message passing between pages
+            session_start();
+
+            // Include required files
+            require_once "backend_cors.php";
+            require_once "backend_config.php";
+            require_once "backend_redis_helper.php";
+
+            // Initialize variables
+            $message = '';
+            $error = '';
+            $db_connected = false;
+            $redis_store = null;
+
+            /**
+             * Connect to the database
+             * @return PDO|null Database connection or null on failure
+             */
+            function connectToDatabase() {
+                global $host, $dbname, $user, $password, $debug_mode, $redis_store;
+                
+                try {
+                    // For testing without a real database, use Redis
+                    if ($host === "YOUR_RDS_ENDPOINT" || $host === "TEST_MODE") {
+                        // Initialize Redis store and test data
+                        $redis_store = new RedisPropertyStore();
+                        $redis_store->initTestData();
+                        return true;
+                    } else {
+                        // Real PostgreSQL connection
+                        $pdo = new PDO("pgsql:host=$host;dbname=$dbname", $user, $password);
+                        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                        
+                        // Create table if not exists
+                        $pdo->exec("CREATE TABLE IF NOT EXISTS properties (
+                            id SERIAL PRIMARY KEY,
+                            title VARCHAR(200) NOT NULL,
+                            property_type VARCHAR(50) NOT NULL,
+                            price DECIMAL(12,2) NOT NULL,
+                            size_sqft INTEGER NOT NULL,
+                            bedrooms INTEGER,
+                            bathrooms INTEGER,
+                            location VARCHAR(200) NOT NULL,
+                            status VARCHAR(50) DEFAULT 'Available',
+                            description TEXT,
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )");
+                        
+                        return $pdo;
+                    }
+                } catch(PDOException $e) {
+                    if ($debug_mode) {
+                        error_log("Database connection error: " . $e->getMessage());
+                    }
+                    return null;
+                }
+            }
+
+            // Try to connect to the database
+            $pdo = connectToDatabase();
+            $db_connected = ($pdo === true) || ($pdo instanceof PDO);
+
+            // Process form submissions if database is connected
+            if ($db_connected && $_SERVER["REQUEST_METHOD"] == "POST") {
+                if (isset($_POST['action'])) {
+                    try {
+                        $callback_url = isset($_POST['callback_url']) ? $_POST['callback_url'] : null;
+                        
+                        switch ($_POST['action']) {
+                            case 'create':
+                                if ($pdo === true) {
+                                    // Using Redis
+                                    $redis_store->createProperty([
+                                        'title' => $_POST['title'],
+                                        'property_type' => $_POST['property_type'],
+                                        'price' => $_POST['price'],
+                                        'size_sqft' => $_POST['size_sqft'],
+                                        'bedrooms' => $_POST['bedrooms'] ?? null,
+                                        'bathrooms' => $_POST['bathrooms'] ?? null,
+                                        'location' => $_POST['location'],
+                                        'status' => $_POST['status'],
+                                        'description' => $_POST['description'] ?? ''
+                                    ]);
+                                } else {
+                                    // Using PostgreSQL
+                                    $stmt = $pdo->prepare("INSERT INTO properties (title, property_type, price, size_sqft, bedrooms, bathrooms, location, status, description) 
+                                                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)");
+                                    $stmt->execute([
+                                        $_POST['title'],
+                                        $_POST['property_type'],
+                                        $_POST['price'],
+                                        $_POST['size_sqft'],
+                                        $_POST['bedrooms'] ?? null,
+                                        $_POST['bathrooms'] ?? null,
+                                        $_POST['location'],
+                                        $_POST['status'],
+                                        $_POST['description'] ?? ''
+                                    ]);
+                                }
+                                $message = "Property listed successfully!";
+                                break;
+
+                            case 'update':
+                                if ($pdo === true) {
+                                    // Using Redis
+                                    $redis_store->updateProperty($_POST['id'], ['status' => $_POST['status']]);
+                                } else {
+                                    // Using PostgreSQL
+                                    $stmt = $pdo->prepare("UPDATE properties SET status=? WHERE id=?");
+                                    $stmt->execute([$_POST['status'], $_POST['id']]);
+                                }
+                                $message = "Property status updated successfully!";
+                                break;
+
+                            case 'delete':
+                                if ($pdo === true) {
+                                    // Using Redis
+                                    $redis_store->deleteProperty($_POST['id']);
+                                } else {
+                                    // Using PostgreSQL
+                                    $stmt = $pdo->prepare("DELETE FROM properties WHERE id=?");
+                                    $stmt->execute([$_POST['id']]);
+                                }
+                                $message = "Property listing removed successfully!";
+                                break;
+                        }
+                        
+                        // Handle callback or redirect
+                        if ($callback_url) {
+                            // Send JSON response to callback URL
+                            $ch = curl_init("http://" . $callback_url);
+                            curl_setopt($ch, CURLOPT_POST, 1);
+                            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['message' => $message]));
+                            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+                            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                            curl_exec($ch);
+                            curl_close($ch);
+                            
+                            // Return success response
+                            header('Content-Type: application/json');
+                            echo json_encode(['status' => 'success', 'message' => $message]);
+                            exit;
+                        } else {
+                            $_SESSION['message'] = $message;
+                        }
+                    } catch (Exception $e) {
+                        $error_msg = $debug_mode ? $e->getMessage() : "An error occurred while processing your request.";
+                        
+                        if ($callback_url) {
+                            // Send error to callback URL
+                            $ch = curl_init("http://" . $callback_url);
+                            curl_setopt($ch, CURLOPT_POST, 1);
+                            curl_setopt($ch, CURLOPT_POSTFIELDS, json_encode(['error' => $error_msg]));
+                            curl_setopt($ch, CURLOPT_HTTPHEADER, ['Content-Type: application/json']);
+                            curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+                            curl_exec($ch);
+                            curl_close($ch);
+                            
+                            // Return error response
+                            header('Content-Type: application/json');
+                            echo json_encode(['status' => 'error', 'error' => $error_msg]);
+                            exit;
+                        } else {
+                            $_SESSION['error'] = $error_msg;
+                        }
+                    }
+                    
+                    // Redirect if no callback URL and not already exited
+                    if (!$callback_url) {
+                        header("Location: frontend.php");
+                        exit;
+                    }
+                }
+            }
+
+            // Fetch all properties if database is connected
+            $properties = [];
+            if ($db_connected) {
+                try {
+                    if ($pdo === true) {
+                        // Using Redis
+                        $properties = $redis_store->getAllProperties();
+                    } else {
+                        // Using PostgreSQL
+                        $stmt = $pdo->query("SELECT * FROM properties ORDER BY created_at DESC");
+                        $properties = $stmt->fetchAll(PDO::FETCH_ASSOC);
+                    }
+                } catch (Exception $e) {
+                    if ($debug_mode) {
+                        $error = $e->getMessage();
+                        error_log("Error fetching properties: " . $e->getMessage());
+                    }
+                }
+            }
+
+            // If this file is accessed directly (API mode), return JSON
+            if (basename($_SERVER['PHP_SELF']) == basename(__FILE__)) {
+                header('Content-Type: application/json');
+                
+                // Check if this is a test request
+                if (isset($_GET['test'])) {
+                    echo json_encode([
+                        'status' => 'ok',
+                        'db_connected' => $db_connected,
+                        'message' => 'Backend is functioning correctly',
+                        'post_data' => $_POST,
+                        'session_data' => $_SESSION
+                    ]);
+                    exit;
+                }
+                
+                // Simple API endpoint handling
+                if (isset($_GET['api'])) {
+                    if (!$db_connected) {
+                        echo json_encode(['error' => 'Database connection failed']);
+                        exit;
+                    }
+                    
+                    try {
+                        switch ($_GET['api']) {
+                            case 'properties':
+                                echo json_encode($properties);
+                                break;
+                            case 'property':
+                                if (isset($_GET['id'])) {
+                                    if ($pdo === true) {
+                                        // Using Redis
+                                        $property = $redis_store->getProperty($_GET['id']);
+                                        echo json_encode($property ?: ['error' => 'Property not found']);
+                                    } else {
+                                        // Using PostgreSQL
+                                        $stmt = $pdo->prepare("SELECT * FROM properties WHERE id = ?");
+                                        $stmt->execute([$_GET['id']]);
+                                        $property = $stmt->fetch(PDO::FETCH_ASSOC);
+                                        echo json_encode($property ?: ['error' => 'Property not found']);
+                                    }
+                                } else {
+                                    echo json_encode(['error' => 'Property ID required']);
+                                }
+                                break;
+                            default:
+                                echo json_encode(['error' => 'Unknown API endpoint']);
+                        }
+                    } catch (Exception $e) {
+                        echo json_encode(['error' => $debug_mode ? $e->getMessage() : 'API error']);
+                    }
+                    exit;
+                }
+            }
+            ?>
+            EOF
+
+            # Configure Apache to allow .htaccess files
+            sed -i '/<Directory "\/var\/www\/html">/,/<\/Directory>/ s/AllowOverride None/AllowOverride All/' /etc/httpd/conf/httpd.conf
+
+            # Restart Apache to apply changes
+            systemctl restart httpd
+
+            # Create a health check file
+            echo "OK" > /var/www/html/health.html
+
+            # Log completion
+            echo "App server setup completed" > /var/log/user-data-success.log
+
+  # Database Subnet Group
+  DBSubnetGroup:
+    Type: AWS::RDS::DBSubnetGroup
+    Properties:
+      DBSubnetGroupDescription: Subnet group for RDS database
+      SubnetIds:
+        - !Ref DBSubnet1
+        - !Ref DBSubnet2
+
+  # RDS Database Instance
+  DBInstance:
+    Type: AWS::RDS::DBInstance
+    Properties:
+      AllocatedStorage: 20
+      DBInstanceClass: !Ref DBInstanceType
+      DBName: !Ref DBName
+      Engine: postgres
+      EngineVersion: 13.7
+      MasterUsername: !Ref DBUsername
+      MasterUserPassword: !Ref DBPassword
+      DBSubnetGroupName: !Ref DBSubnetGroup
+      VPCSecurityGroups:
+        - !Ref DBSecurityGroup
+      MultiAZ: false
+      PubliclyAccessible: false
+      StorageType: gp2
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-Database
+
+  # Auto Scaling Groups
+  WebServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-WebServerASG
+      LaunchTemplate:
+        LaunchTemplateId: !Ref WebServerLaunchTemplate
+        Version: !GetAtt WebServerLaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      TargetGroupARNs:
+        - !Ref WebServerTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-WebServer
+          PropagateAtLaunch: true
+
+  AppServerAutoScalingGroup:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: !Sub ${AWS::StackName}-AppServerASG
+      LaunchTemplate:
+        LaunchTemplateId: !Ref AppServerLaunchTemplate
+        Version: !GetAtt AppServerLaunchTemplate.LatestVersionNumber
+      MinSize: 2
+      MaxSize: 4
+      DesiredCapacity: 2
+      VPCZoneIdentifier:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      TargetGroupARNs:
+        - !Ref AppServerTargetGroup
+      HealthCheckType: ELB
+      HealthCheckGracePeriod: 300
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-AppServer
+          PropagateAtLaunch: true
+
+  # Load Balancers
+  WebServerLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-WebLB
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref WebServerSecurityGroup
+      Scheme: internet-facing
+      Type: application
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-WebLB
+
+  WebServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-WebTG
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /health.html
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetType: instance
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-WebTG
+
+  WebServerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref WebServerTargetGroup
+      LoadBalancerArn: !Ref WebServerLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  AppServerLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-AppLB
+      Subnets:
+        - !Ref PrivateSubnet1
+        - !Ref PrivateSubnet2
+      SecurityGroups:
+        - !Ref AppServerSecurityGroup
+      Scheme: internal
+      Type: application
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-AppLB
+
+  AppServerTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-AppTG
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      HealthCheckPath: /health.html
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      TargetType: instance
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-AppTG
+
+  AppServerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref AppServerTargetGroup
+      LoadBalancerArn: !Ref AppServerLoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+Outputs:
+  WebsiteURL:
+    Description: URL of the web application
+    Value: !Sub http://${WebServerLoadBalancer.DNSName}/frontend.php
+
+  WebServerLoadBalancerDNSName:
+    Description: DNS name of the web server load balancer
+    Value: !GetAtt WebServerLoadBalancer.DNSName
+
+  AppServerLoadBalancerDNSName:
+    Description: DNS name of the app server load balancer
+    Value: !GetAtt AppServerLoadBalancer.DNSName
+
+  DatabaseEndpoint:
+    Description: Endpoint of the database
+    Value: !GetAtt DBInstance.Endpoint.Address
+    
+  RedisEndpoint:
+    Description: Endpoint of the Redis cluster
+    Value: !GetAtt RedisCluster.RedisEndpoint.Address

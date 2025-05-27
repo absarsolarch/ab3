@@ -427,7 +427,7 @@ Resources:
       LaunchTemplateName: !Sub ${AWS::StackName}-WebServerLaunchTemplate
       VersionDescription: Initial version
       LaunchTemplateData:
-        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 AMI (replace with the latest AMI ID)
+        ImageId: ami-028ab64837840c18f  # Amazon Linux 2 AMI (replace with the latest AMI ID)
         InstanceType: !Ref WebServerInstanceType
         KeyName: !Ref KeyName
         SecurityGroupIds:
@@ -473,7 +473,7 @@ Resources:
       LaunchTemplateName: !Sub ${AWS::StackName}-AppServerLaunchTemplate
       VersionDescription: Initial version
       LaunchTemplateData:
-        ImageId: ami-0c55b159cbfafe1f0  # Amazon Linux 2 AMI (replace with the latest AMI ID)
+        ImageId: ami-028ab64837840c18f  # Amazon Linux 2 AMI (replace with the latest AMI ID)
         InstanceType: !Ref AppServerInstanceType
         KeyName: !Ref KeyName
         SecurityGroupIds:
@@ -542,7 +542,7 @@ Resources:
       DBInstanceClass: !Ref DBInstanceType
       DBName: !Ref DBName
       Engine: postgres
-      EngineVersion: 13.4
+      EngineVersion: 17.2
       MasterUsername: !Ref DBUsername
       MasterUserPassword: !Ref DBPassword
       DBSubnetGroupName: !Ref DBSubnetGroup
